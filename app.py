@@ -77,18 +77,15 @@ def delete_record(index):
         save_history(st.session_state.db['manual_results'])
 
 # ==========================================
-# 3. 數據精算與爬蟲 (新增：股票名稱)
+# 3. 數據精算與爬蟲
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_data(ticker):
     try: 
-        tk_obj = yf.Ticker(ticker)
-        df = tk_obj.history(period="1y")
-        if df.empty: return None, None
-        try: name = tk_obj.info.get('shortName', ticker)
-        except: name = ticker
-        return df, name
-    except: return None, None
+        df = yf.Ticker(ticker).history(period="1y")
+        if df.empty: return None
+        return df
+    except: return None
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_market_return(is_tw):
@@ -118,29 +115,25 @@ def calculate_technical_data(df, market_ret):
     except: return None
 
 # ==========================================
-# 4. 核心調度 (🛠️ 省油快取 + 影子備援)
+# 4. 核心調度 (省油快取 + 影子備援 + AI中文命名)
 # ==========================================
-# 🛠️ 策略二：系統級指令 (最省 Token 的人設宣告)
 SYS_INSTRUCT = """你是朱家泓波段長。用8大模組(均線15,型態15,壓力10,價量15,RS15,MACD10,KD10,乖離10)量化評分。
 否決條件:破下彎20MA/高檔爆量長黑/破20日低。
-必須回傳純JSON，鍵值：{"total_score":總分, "veto_alert":"否決原因或空", "radar_scores":[這8項的整數得分依序], "tech_breakdown":{"項目":"短評"}, "trading_plan":{"buy_zone":"","stop_loss":"","take_profit":"","risk_reward_eval":""}, "conclusion":"操作建議"}"""
+必須回傳純JSON，鍵值：{"stock_name":"請直接提供該代號的中文股票名稱", "total_score":總分, "veto_alert":"否決原因或空", "radar_scores":[這8項的整數得分依序], "tech_breakdown":{"項目":"短評"}, "trading_plan":{"buy_zone":"","stop_loss":"","take_profit":"","risk_reward_eval":""}, "conclusion":"操作建議"}"""
 
 def safe_generate_content(prompt_data):
     num_keys = len(API_KEYS)
     for attempt in range(num_keys * 3): 
-        time.sleep(random.uniform(1.0, 2.5)) # Jitter
+        time.sleep(random.uniform(1.0, 2.5)) 
         
-        # 🛠️ 影子備援機制：優先用前 N-1 把免費金鑰，最後一把是付費 VIP
         healthy_idx = -1
         free_keys = list(range(num_keys - 1)) if num_keys > 1 else [0]
         vip_key = num_keys - 1
         
-        # 先查免費金鑰
         for idx in free_keys:
             if datetime.now() >= st.session_state.key_pool[idx]:
                 healthy_idx = idx; break
         
-        # 免費都在冷卻，才動用付費金鑰
         if healthy_idx == -1 and num_keys > 1 and datetime.now() >= st.session_state.key_pool[vip_key]:
             healthy_idx = vip_key
             
@@ -163,20 +156,25 @@ def safe_generate_content(prompt_data):
 def run_analysis(ticker_input):
     try:
         tk, cost = (ticker_input.split("@")[0].strip().upper(), float(ticker_input.split("@")[1].strip())) if "@" in ticker_input else (ticker_input.strip().upper(), None)
-        df, name = get_stock_data(tk + ".TW") if tk.isdigit() else get_stock_data(tk)
-        if df is None and tk.isdigit(): df, name = get_stock_data(tk + ".TWO")
+        
+        # 修正 K 線圖抓不到資料的 Bug：保留 .TW 綴詞
+        yahoo_tk = tk + ".TW" if tk.isdigit() else tk
+        df = get_stock_data(yahoo_tk)
+        if df is None and tk.isdigit(): 
+            yahoo_tk = tk + ".TWO"
+            df = get_stock_data(yahoo_tk)
         
         if df is None: return {"error": "無法取得報價資料"}
         ta = calculate_technical_data(df, get_market_return(".TW" in tk or ".TWO" in tk))
         if ta is None: return {"error": "指標運算異常"}
         
-        # 🛠️ 策略一：機器語微縮化 (大幅降低輸入 Token)
         mini_prompt = f'{{"T":"{tk}","C":{ta["C"]},"MAs":{ta["MAs"]},"T20":{ta["T20"]},"B":{ta["BIAS"]},"ATR":{ta["ATR"]},"RS":{ta["RS"]},"MH":{ta["MH"]},"K":{ta["K"]},"D":{ta["D"]},"Cost":{cost if cost else "null"}}}'
         
         res = safe_generate_content(mini_prompt)
         raw = res.text
         parsed = json.loads(raw[raw.find('{'):raw.rfind('}')+1])
-        parsed.update({'cost_price': cost, 'resolved_ticker': tk, 'stock_name': name, 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'current_price': ta['C']})
+        # 將正確的 yahoo_ticker 存起來，給 UI 畫 K 線用
+        parsed.update({'cost_price': cost, 'resolved_ticker': tk, 'yahoo_ticker': yahoo_tk, 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'current_price': ta['C']})
         return parsed
     except Exception as e: return {"error": f"系統異常: {str(e)}"}
 
@@ -187,22 +185,22 @@ def plot_kline(df, cost=None):
     try:
         df['5MA'], df['10MA'], df['20MA'], df['60MA'] = [df['Close'].rolling(w).mean() for w in [5, 10, 20, 60]]
         df = df.tail(60)
-        fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線')])
-        for ma, color, n in [(df['5MA'], 'blue', '5MA'), (df['10MA'], 'orange', '10MA'), (df['20MA'], 'green', '20MA'), (df['60MA'], 'purple', '60MA')]:
+        # K線本體就是「日線」
+        fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='日K線')])
+        for ma, color, n in [(df['5MA'], 'blue', '5日線'), (df['10MA'], 'orange', '10日線'), (df['20MA'], 'green', '月線(20日)'), (df['60MA'], 'purple', '季線(60日)')]:
             fig.add_trace(go.Scatter(x=df.index, y=ma, line=dict(color=color, width=1.5), name=n))
         if cost: fig.add_hline(y=cost, line_dash="dash", line_color="red", annotation_text=f"成本: {cost}")
-        fig.update_layout(height=350, margin=dict(l=0,r=0,t=20,b=0), xaxis_rangeslider_visible=False)
+        fig.update_layout(height=350, margin=dict(l=0,r=0,t=20,b=0), xaxis_rangeslider_visible=False, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
         return fig
     except: return None
 
-# 🛠️ 新增：朱家泓戰力雷達圖
 def plot_radar(scores):
     try:
         cats = ['均線(15)', '型態(15)', '壓力(10)', '價量(15)', 'RS(15)', 'MACD(10)', 'KD(10)', '乖離(10)']
         max_s = [15, 15, 10, 15, 15, 10, 10, 10]
         if len(scores) != 8: return None
         norm = [(s/m)*100 for s, m in zip(scores, max_s)]
-        norm.append(norm[0]); cats.append(cats[0]); scores.append(scores[0]) # 閉合
+        norm.append(norm[0]); cats.append(cats[0]); scores.append(scores[0])
         
         fig = go.Figure(go.Scatterpolar(
             r=norm, theta=cats, fill='toself', fillcolor='rgba(0, 150, 255, 0.3)', line=dict(color='rgba(0, 110, 255, 0.8)', width=2),
@@ -236,15 +234,15 @@ if st.button("🚀 啟動學術診斷", type="primary", use_container_width=True
         prog.progress((idx + 1) / len(tickers))
     st.rerun()
 
-# 渲染報告
 for i, item in enumerate(st.session_state.db['manual_results']):
     d = item['deep']
-    tk, name = item['full_ticker'], d.get('stock_name', '')
+    tk = d.get('resolved_ticker', '')
+    yahoo_tk = d.get('yahoo_ticker', tk) # 畫 K 線用的正確代碼
+    name = d.get('stock_name', '') # Gemini 聰明生成的中文名
     cost, c_price = d.get('cost_price'), d.get('current_price', 0)
     
-    # 🛠️ 新增：即時損益標籤與外部捷徑
     pnl_tag = f"&nbsp;&nbsp;<span style='color:{'#ff4b4b' if c_price>=cost else '#00cc96'}; font-weight:bold;'>【帳面: {'+' if c_price>=cost else ''}{round((c_price-cost)/cost*100, 2)}%】</span>" if cost else ""
-    links = f"&nbsp;&nbsp;<a href='https://hk.finance.yahoo.com/quote/{tk}' target='_blank' style='text-decoration:none; background:#eee; color:#333; padding:2px 8px; border-radius:12px; font-size:12px;'>Yahoo</a>&nbsp;<a href='https://tw.tradingview.com/chart/?symbol={tk.split('.')[0]}' target='_blank' style='text-decoration:none; background:#eee; color:#333; padding:2px 8px; border-radius:12px; font-size:12px;'>TradingView</a>"
+    links = f"&nbsp;&nbsp;<a href='https://hk.finance.yahoo.com/quote/{yahoo_tk}' target='_blank' style='text-decoration:none; background:#eee; color:#333; padding:2px 8px; border-radius:12px; font-size:12px;'>Yahoo</a>&nbsp;<a href='https://tw.tradingview.com/chart/?symbol={tk}' target='_blank' style='text-decoration:none; background:#eee; color:#333; padding:2px 8px; border-radius:12px; font-size:12px;'>TradingView</a>"
     
     with st.expander(f"📌 {tk} {name}", expanded=(i==0)):
         st.markdown(f"🕒 *分析時間: {d.get('timestamp', '未知')}* {pnl_tag} {links}", unsafe_allow_html=True)
@@ -259,11 +257,18 @@ for i, item in enumerate(st.session_state.db['manual_results']):
             for k, v in d.get('tech_breakdown', {}).items(): st.write(f"- **{k}**: {v}")
             p = d.get('trading_plan', {})
             st.warning(f"買區: {p.get('buy_zone')}\n\n停損: {p.get('stop_loss')}\n\n停利: {p.get('take_profit')}\n\n風報: {p.get('risk_reward_eval')}")
+            
+            # 📋 一鍵複製區塊 (整合版段落)
+            copy_text = f"【{tk} {name}】波段診斷報告\n時間: {d.get('timestamp', '')}\n總分: {d.get('total_score', '')} / 100\n結論: {d.get('conclusion', '')}\n否決: {d.get('veto_alert', '無')}\n"
+            copy_text += "\n[實戰計畫]\n" + f"買區: {p.get('buy_zone')}\n停損: {p.get('stop_loss')}\n停利: {p.get('take_profit')}\n風報比: {p.get('risk_reward_eval')}"
+            st.markdown("<br>**📋 點擊右側圖示一鍵複製報告：**", unsafe_allow_html=True)
+            st.code(copy_text, language="markdown")
+            
         with c_right:
             radar_fig = plot_radar(d.get('radar_scores', []))
             if radar_fig: st.plotly_chart(radar_fig, use_container_width=True, key=f"r_{i}")
             
-            df_k, _ = get_stock_data(tk)
+            df_k = get_stock_data(yahoo_tk)
             if df_k is not None:
                 k_fig = plot_kline(df_k, cost)
                 if k_fig: st.plotly_chart(k_fig, use_container_width=True, key=f"k_{i}")
