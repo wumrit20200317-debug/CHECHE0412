@@ -351,4 +351,67 @@ with col_clear:
         st.session_state.db = {"manual_results": []}
         save_history([]); st.rerun()
 
-if st.button("🚀 啟動學術診斷", type="
+if st.button("🚀 啟動學術診斷", type="primary", use_container_width=True):
+    tickers = [t.strip() for t in user_in.split(",") if t.strip()]
+    prog, status = st.progress(0), st.empty()
+    for idx, tk in enumerate(tickers):
+        status.info(f"⏳ 分析 {tk} ...")
+        res = run_analysis(tk)
+        if "error" not in res:
+            st.session_state.db['manual_results'].insert(0, {"full_ticker": res['resolved_ticker'], "deep": res})
+            save_history(st.session_state.db['manual_results'])
+        else: st.error(f"❌ {tk} 失敗：{res['error']}")
+        prog.progress((idx + 1) / len(tickers))
+    st.rerun()
+
+for i, item in enumerate(st.session_state.db['manual_results']):
+    d = item['deep']
+    tk = d.get('resolved_ticker', '')
+    yahoo_tk = d.get('yahoo_ticker', tk) 
+    name = d.get('stock_name', '') 
+    cost, c_price = d.get('cost_price'), d.get('current_price', 0)
+    
+    pnl_tag = f"&nbsp;&nbsp;<span style='color:{'#ff4b4b' if c_price>=cost else '#00cc96'}; font-weight:bold;'>【帳面: {'+' if c_price>=cost else ''}{round((c_price-cost)/cost*100, 2)}%】</span>" if cost else ""
+    links = f"&nbsp;&nbsp;<a href='https://hk.finance.yahoo.com/quote/{yahoo_tk}' target='_blank' style='text-decoration:none; background:#eee; color:#333; padding:2px 8px; border-radius:12px; font-size:12px;'>Yahoo</a>&nbsp;<a href='https://tw.tradingview.com/chart/?symbol={tk}' target='_blank' style='text-decoration:none; background:#eee; color:#333; padding:2px 8px; border-radius:12px; font-size:12px;'>TradingView</a>"
+    
+    with st.expander(f"📌 {tk} {name}", expanded=(i==0)):
+        st.markdown(f"🕒 *分析時間: {d.get('timestamp', '未知')}* {pnl_tag} {links}", unsafe_allow_html=True)
+        if d.get('veto_alert') and d.get('veto_alert') != '無': st.error(f"🚫 否決：{d['veto_alert']}")
+        
+        st.markdown(f"<h1 style='text-align:center;'>{d.get('total_score', '?')} / 100</h1>", unsafe_allow_html=True)
+        st.info(f"**操作建議：** {d.get('conclusion', '')}")
+        
+        c_left, c_right = st.columns([1, 1])
+        with c_left:
+            st.subheader("📊 給分細節")
+            for k, v in d.get('tech_breakdown', {}).items(): st.write(f"- **{k}**: {v}")
+            p = d.get('trading_plan', {})
+            st.warning(f"買區: {p.get('buy_zone')}\n\n停損: {p.get('stop_loss')}\n\n停利: {p.get('take_profit')}\n\n風報: {p.get('risk_reward_eval')}")
+            
+            # 📋 一鍵複製區塊
+            copy_text = f"【{tk} {name}】波段診斷報告\n時間: {d.get('timestamp', '')}\n總分: {d.get('total_score', '')} / 100\n結論: {d.get('conclusion', '')}\n否決: {d.get('veto_alert', '無')}\n"
+            copy_text += "\n[實戰計畫]\n" + f"買區: {p.get('buy_zone')}\n停損: {p.get('stop_loss')}\n停利: {p.get('take_profit')}\n風報比: {p.get('risk_reward_eval')}"
+            st.markdown("<br>**📋 點擊右側圖示一鍵複製報告：**", unsafe_allow_html=True)
+            st.code(copy_text, language="markdown")
+            
+        with c_right:
+            radar_fig = plot_radar(d.get('radar_scores', []))
+            if radar_fig: st.plotly_chart(radar_fig, use_container_width=True, key=f"r_{i}")
+            
+            df_k = get_stock_data(yahoo_tk)
+            if df_k is not None:
+                k_fig = plot_kline(df_k, cost)
+                if k_fig: st.plotly_chart(k_fig, use_container_width=True, key=f"k_{i}")
+
+        st.write("---")
+        b1, b2, b3 = st.columns([1, 1, 2])
+        with b1:
+            if st.button("🔄 重新診斷", key=f"up_{i}", use_container_width=True):
+                target = f"{tk}@{cost}" if cost else tk
+                new_res = run_analysis(target)
+                if "error" not in new_res:
+                    st.session_state.db['manual_results'][i]['deep'] = new_res
+                    save_history(st.session_state.db['manual_results']); st.rerun()
+        with b2:
+            if st.button("❌ 刪除紀錄", key=f"del_{i}", use_container_width=True):
+                delete_record(i); st.rerun()
