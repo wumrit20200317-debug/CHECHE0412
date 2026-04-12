@@ -9,6 +9,8 @@ import pandas as pd
 import numpy as np
 import random
 from datetime import datetime, timedelta
+import urllib.request
+import re
 
 # ==========================================
 # 1. 密碼大門邏輯 (Security Gate)
@@ -77,8 +79,21 @@ def delete_record(index):
         save_history(st.session_state.db['manual_results'])
 
 # ==========================================
-# 3. 數據精算與爬蟲
+# 3. 數據精算與爬蟲 (0 Token 中文命名)
 # ==========================================
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_chinese_name(yahoo_tk):
+    try:
+        url = f"https://hk.finance.yahoo.com/quote/{yahoo_tk}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        html = urllib.request.urlopen(req, timeout=3).read().decode('utf-8')
+        match = re.search(r'<title>(.*?)\s+\(', html)
+        if match: 
+            name = match.group(1).replace('股票價格', '').replace('今日', '').strip()
+            return name
+    except: pass
+    return yahoo_tk
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_data(ticker):
     try: 
@@ -97,29 +112,99 @@ def get_market_return(is_tw):
 def calculate_technical_data(df, market_ret):
     try:
         close = df['Close'].iloc[-1]
+        open_p = df['Open'].iloc[-1]
         ma5, ma10, ma20, ma60 = [df['Close'].rolling(w).mean().iloc[-1] for w in [5, 10, 20, 60]]
         ma20_yest = df['Close'].rolling(20).mean().iloc[-2]
-        tr = pd.concat([df['High']-df['Low'], np.abs(df['High']-df['Close'].shift()), np.abs(df['Low']-df['Close'].shift())], axis=1).max(axis=1)
+        
+        vol = df['Volume'].iloc[-1]
+        vol_5ma = df['Volume'].rolling(5).mean().iloc[-1]
+        
+        high_20 = df['High'].tail(20).max()
+        low_20 = df['Low'].tail(20).min()
+        
         exp1, exp2 = df['Close'].ewm(span=12, adjust=False).mean(), df['Close'].ewm(span=26, adjust=False).mean()
         dif, dea = (exp1 - exp2), (exp1 - exp2).ewm(span=9, adjust=False).mean()
+        osc = dif - dea
+        osc_yest = osc.iloc[-2]
+        
         low_9, high_9 = df['Low'].rolling(9).min(), df['High'].rolling(9).max()
         rsv = (df['Close'] - low_9) / (high_9 - low_9) * 100
         k = rsv.ewm(alpha=1/3).mean()
+        d = k.ewm(alpha=1/3).mean()
+        k_yest = k.iloc[-2]
+        
+        rs = ((df.tail(10)['Close'].iloc[-1] - df.tail(10)['Close'].iloc[0])/df.tail(10)['Close'].iloc[0]*100) - market_ret
+        bias20 = (close - ma20)/ma20*100
         
         return {
-            "C": round(close, 2), "MAs": [round(ma5,2), round(ma10,2), round(ma20,2), round(ma60,2)],
-            "T20": 1 if ma20 > ma20_yest else 0, "BIAS": round((close - ma20)/ma20*100, 2), 
-            "ATR": round(tr.rolling(14).mean().iloc[-1], 2), "RS": round(((df.tail(10)['Close'].iloc[-1] - df.tail(10)['Close'].iloc[0])/df.tail(10)['Close'].iloc[0]*100) - market_ret, 2),
-            "MH": round((dif - dea).iloc[-1], 2), "K": round(k.iloc[-1], 2), "D": round(k.ewm(alpha=1/3).mean().iloc[-1], 2)
+            "C": round(close, 2), "O": round(open_p, 2), "MAs": [round(ma5,2), round(ma10,2), round(ma20,2), round(ma60,2)],
+            "T20": 1 if ma20 > ma20_yest else 0, "BIAS": round(bias20, 2), 
+            "RS": round(rs, 2), "Vol": vol, "Vol5": vol_5ma,
+            "H20": round(high_20, 2), "L20": round(low_20, 2),
+            "DIF": round(dif.iloc[-1], 2), "DEA": round(dea.iloc[-1], 2), "OSC": round(osc.iloc[-1], 2), "OSC_Y": round(osc_yest, 2),
+            "K": round(k.iloc[-1], 2), "D": round(d.iloc[-1], 2), "K_Y": round(k_yest, 2)
         }
     except: return None
 
 # ==========================================
-# 4. 核心調度 (省油快取 + 影子備援 + AI中文命名)
+# 4. 鐵血計分引擎 (Python 100% 客觀給分)
 # ==========================================
-SYS_INSTRUCT = """你是朱家泓波段長。用8大模組(均線15,型態15,壓力10,價量15,RS15,MACD10,KD10,乖離10)量化評分。
-否決條件:破下彎20MA/高檔爆量長黑/破20日低。
-必須回傳純JSON，鍵值：{"stock_name":"請直接提供該代號的中文股票名稱", "total_score":總分, "veto_alert":"否決原因或空", "radar_scores":[這8項的整數得分依序], "tech_breakdown":{"項目":"短評"}, "trading_plan":{"buy_zone":"","stop_loss":"","take_profit":"","risk_reward_eval":""}, "conclusion":"操作建議"}"""
+def get_python_scores(ta):
+    scores = {}
+    C, MAs, T20 = ta["C"], ta["MAs"], ta["T20"]
+    
+    # 1. 均線(15)
+    if C > MAs[0] > MAs[1] > MAs[2] > MAs[3]: scores["MA"] = 15
+    elif C > MAs[2] and T20 == 1: scores["MA"] = 10
+    elif T20 == 1: scores["MA"] = 5
+    else: scores["MA"] = 0
+    
+    # 2. 型態動能(15) - 創20日新高
+    if C >= ta["H20"]: scores["Pattern"] = 15
+    elif C >= ta["H20"] * 0.97: scores["Pattern"] = 10
+    elif C >= (ta["H20"] + ta["L20"])/2: scores["Pattern"] = 5
+    else: scores["Pattern"] = 0
+    
+    # 3. 壓力/支撐(10)
+    if C > MAs[3]: scores["Support"] = 10
+    else: scores["Support"] = 0
+    
+    # 4. 價量(15)
+    if C > ta["O"] and ta["Vol"] > ta["Vol5"] * 1.5: scores["Volume"] = 15
+    elif C > ta["O"] and ta["Vol"] > ta["Vol5"]: scores["Volume"] = 10
+    elif ta["Vol"] <= ta["Vol5"]: scores["Volume"] = 5
+    else: scores["Volume"] = 0
+    
+    # 5. RS(15)
+    if ta["RS"] > 5: scores["RS"] = 15
+    elif ta["RS"] > 0: scores["RS"] = 10
+    else: scores["RS"] = 0
+    
+    # 6. MACD(10)
+    if ta["DIF"] > ta["DEA"] and ta["OSC"] > ta["OSC_Y"] and ta["OSC"] > 0: scores["MACD"] = 10
+    elif ta["DIF"] > ta["DEA"] and ta["OSC"] > 0: scores["MACD"] = 7
+    elif ta["DIF"] < ta["DEA"] and ta["OSC"] > ta["OSC_Y"]: scores["MACD"] = 3
+    else: scores["MACD"] = 0
+    
+    # 7. KD(10)
+    if ta["K"] > ta["D"] and ta["K"] > ta["K_Y"]: scores["KD"] = 10
+    elif ta["K"] > ta["D"]: scores["KD"] = 5
+    else: scores["KD"] = 0
+    
+    # 8. 乖離(10)
+    if 0 <= ta["BIAS"] <= 8: scores["BIAS"] = 10
+    elif 8 < ta["BIAS"] <= 15: scores["BIAS"] = 5
+    else: scores["BIAS"] = 0
+    
+    total = sum(scores.values())
+    radar = [scores["MA"], scores["Pattern"], scores["Support"], scores["Volume"], scores["RS"], scores["MACD"], scores["KD"], scores["BIAS"]]
+    return total, radar
+
+# ==========================================
+# 5. 核心調度 (極致省油版：AI只負責評論)
+# ==========================================
+SYS_INSTRUCT = """你是朱家泓波段長。以下是Python計算的客觀技術分數(滿分100)。
+請根據此分數，嚴格回傳純JSON。鍵值：{"tech_breakdown":{"項目":"基於分數的短評(如:動能極強)"}, "trading_plan":{"buy_zone":"建議買區","stop_loss":"停損價位","take_profit":"停利預估","risk_reward_eval":"風報比簡評"}, "conclusion":"綜合操作建議", "veto_alert":"破20MA或爆量長黑則填寫否決，否則填無"}"""
 
 def safe_generate_content(prompt_data):
     num_keys = len(API_KEYS)
@@ -148,7 +233,7 @@ def safe_generate_content(prompt_data):
             return model.generate_content(prompt_data, generation_config=genai.types.GenerationConfig(temperature=0.0))
         except Exception as e:
             st.session_state.key_pool[healthy_idx] = datetime.now() + timedelta(seconds=60)
-            if "429" in str(e).lower() or "quota" in str(e).lower(): st.toast(f"⚠️ 引擎 {healthy_idx+1} 流量限制，切換備援...")
+            if "429" in str(e).lower() or "quota" in str(e).lower(): st.toast(f"⚠️ 引擎 {healthy_idx+1} 流量限制...")
             else: time.sleep(2)
             continue
     raise Exception("所有引擎嘗試均失敗。")
@@ -157,7 +242,6 @@ def run_analysis(ticker_input):
     try:
         tk, cost = (ticker_input.split("@")[0].strip().upper(), float(ticker_input.split("@")[1].strip())) if "@" in ticker_input else (ticker_input.strip().upper(), None)
         
-        # 修正 K 線圖抓不到資料的 Bug：保留 .TW 綴詞
         yahoo_tk = tk + ".TW" if tk.isdigit() else tk
         df = get_stock_data(yahoo_tk)
         if df is None and tk.isdigit(): 
@@ -168,24 +252,35 @@ def run_analysis(ticker_input):
         ta = calculate_technical_data(df, get_market_return(".TW" in tk or ".TWO" in tk))
         if ta is None: return {"error": "指標運算異常"}
         
-        mini_prompt = f'{{"T":"{tk}","C":{ta["C"]},"MAs":{ta["MAs"]},"T20":{ta["T20"]},"B":{ta["BIAS"]},"ATR":{ta["ATR"]},"RS":{ta["RS"]},"MH":{ta["MH"]},"K":{ta["K"]},"D":{ta["D"]},"Cost":{cost if cost else "null"}}}'
+        # 取得純淨的中文名稱
+        chinese_name = get_chinese_name(yahoo_tk)
+        
+        # 執行鐵血計分
+        total_score, radar_array = get_python_scores(ta)
+        
+        # 極致省油 Prompt
+        mini_prompt = f'{{"T":"{tk}","C":{ta["C"]},"Score":{total_score},"Radar":{radar_array},"MAs":{ta["MAs"]},"B":{ta["BIAS"]}}}'
         
         res = safe_generate_content(mini_prompt)
         raw = res.text
         parsed = json.loads(raw[raw.find('{'):raw.rfind('}')+1])
-        # 將正確的 yahoo_ticker 存起來，給 UI 畫 K 線用
-        parsed.update({'cost_price': cost, 'resolved_ticker': tk, 'yahoo_ticker': yahoo_tk, 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'current_price': ta['C']})
+        
+        # 組合 Python 分數與 AI 評論
+        parsed.update({
+            'total_score': total_score, 'radar_scores': radar_array,
+            'cost_price': cost, 'resolved_ticker': tk, 'yahoo_ticker': yahoo_tk, 
+            'stock_name': chinese_name, 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'current_price': ta['C']
+        })
         return parsed
     except Exception as e: return {"error": f"系統異常: {str(e)}"}
 
 # ==========================================
-# 5. UI 與圖表渲染
+# 6. UI 與圖表渲染
 # ==========================================
 def plot_kline(df, cost=None):
     try:
         df['5MA'], df['10MA'], df['20MA'], df['60MA'] = [df['Close'].rolling(w).mean() for w in [5, 10, 20, 60]]
         df = df.tail(60)
-        # K線本體就是「日線」
         fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='日K線')])
         for ma, color, n in [(df['5MA'], 'blue', '5日線'), (df['10MA'], 'orange', '10日線'), (df['20MA'], 'green', '月線(20日)'), (df['60MA'], 'purple', '季線(60日)')]:
             fig.add_trace(go.Scatter(x=df.index, y=ma, line=dict(color=color, width=1.5), name=n))
@@ -237,8 +332,8 @@ if st.button("🚀 啟動學術診斷", type="primary", use_container_width=True
 for i, item in enumerate(st.session_state.db['manual_results']):
     d = item['deep']
     tk = d.get('resolved_ticker', '')
-    yahoo_tk = d.get('yahoo_ticker', tk) # 畫 K 線用的正確代碼
-    name = d.get('stock_name', '') # Gemini 聰明生成的中文名
+    yahoo_tk = d.get('yahoo_ticker', tk) 
+    name = d.get('stock_name', '') 
     cost, c_price = d.get('cost_price'), d.get('current_price', 0)
     
     pnl_tag = f"&nbsp;&nbsp;<span style='color:{'#ff4b4b' if c_price>=cost else '#00cc96'}; font-weight:bold;'>【帳面: {'+' if c_price>=cost else ''}{round((c_price-cost)/cost*100, 2)}%】</span>" if cost else ""
@@ -246,7 +341,7 @@ for i, item in enumerate(st.session_state.db['manual_results']):
     
     with st.expander(f"📌 {tk} {name}", expanded=(i==0)):
         st.markdown(f"🕒 *分析時間: {d.get('timestamp', '未知')}* {pnl_tag} {links}", unsafe_allow_html=True)
-        if d.get('veto_alert'): st.error(f"🚫 否決：{d['veto_alert']}")
+        if d.get('veto_alert') and d.get('veto_alert') != '無': st.error(f"🚫 否決：{d['veto_alert']}")
         
         st.markdown(f"<h1 style='text-align:center;'>{d.get('total_score', '?')} / 100</h1>", unsafe_allow_html=True)
         st.info(f"**操作建議：** {d.get('conclusion', '')}")
@@ -258,7 +353,7 @@ for i, item in enumerate(st.session_state.db['manual_results']):
             p = d.get('trading_plan', {})
             st.warning(f"買區: {p.get('buy_zone')}\n\n停損: {p.get('stop_loss')}\n\n停利: {p.get('take_profit')}\n\n風報: {p.get('risk_reward_eval')}")
             
-            # 📋 一鍵複製區塊 (整合版段落)
+            # 📋 一鍵複製區塊
             copy_text = f"【{tk} {name}】波段診斷報告\n時間: {d.get('timestamp', '')}\n總分: {d.get('total_score', '')} / 100\n結論: {d.get('conclusion', '')}\n否決: {d.get('veto_alert', '無')}\n"
             copy_text += "\n[實戰計畫]\n" + f"買區: {p.get('buy_zone')}\n停損: {p.get('stop_loss')}\n停利: {p.get('take_profit')}\n風報比: {p.get('risk_reward_eval')}"
             st.markdown("<br>**📋 點擊右側圖示一鍵複製報告：**", unsafe_allow_html=True)
