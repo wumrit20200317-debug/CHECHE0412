@@ -79,20 +79,26 @@ def delete_record(index):
         save_history(st.session_state.db['manual_results'])
 
 # ==========================================
-# 3. 數據精算與爬蟲 (0 Token 中文命名)
+# 3. 數據精算與爬蟲 (升級版偽裝爬蟲)
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_chinese_name(yahoo_tk):
+def get_chinese_name(tk):
     try:
-        url = f"https://hk.finance.yahoo.com/quote/{yahoo_tk}"
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        html = urllib.request.urlopen(req, timeout=3).read().decode('utf-8')
-        match = re.search(r'<title>(.*?)\s+\(', html)
-        if match: 
-            name = match.group(1).replace('股票價格', '').replace('今日', '').strip()
-            return name
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        if tk.isdigit(): 
+            url = f"https://tw.stock.yahoo.com/quote/{tk}"
+            req = urllib.request.Request(url, headers=headers)
+            html = urllib.request.urlopen(req, timeout=3).read().decode('utf-8')
+            match = re.search(r'<title>(.*?)\(', html)
+            if match: return match.group(1).strip()
+        else:
+            url = f"https://hk.finance.yahoo.com/quote/{tk}"
+            req = urllib.request.Request(url, headers=headers)
+            html = urllib.request.urlopen(req, timeout=3).read().decode('utf-8')
+            match = re.search(r'<title>(.*?)\s+\(', html)
+            if match: return match.group(1).replace('股票價格', '').replace('今日', '').strip()
     except: pass
-    return yahoo_tk
+    return "" # 抓不到就回傳空字串，防止出現重複代號
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_data(ticker):
@@ -147,64 +153,92 @@ def calculate_technical_data(df, market_ret):
     except: return None
 
 # ==========================================
-# 4. 鐵血計分引擎 (Python 100% 客觀給分)
+# 4. 鐵血計分引擎 (自帶 8 大細節短評)
 # ==========================================
 def get_python_scores(ta):
     scores = {}
+    breakdown = {}
     C, MAs, T20 = ta["C"], ta["MAs"], ta["T20"]
     
     # 1. 均線(15)
-    if C > MAs[0] > MAs[1] > MAs[2] > MAs[3]: scores["MA"] = 15
-    elif C > MAs[2] and T20 == 1: scores["MA"] = 10
-    elif T20 == 1: scores["MA"] = 5
-    else: scores["MA"] = 0
+    if C > MAs[0] > MAs[1] > MAs[2] > MAs[3]: 
+        scores["MA"] = 15; breakdown["均線"] = "短中長天期均線呈標準多頭排列，多方動能極強。"
+    elif C > MAs[2] and T20 == 1: 
+        scores["MA"] = 10; breakdown["均線"] = "股價穩站月線(20MA)之上且趨勢向上，具備波段保護力。"
+    elif T20 == 1: 
+        scores["MA"] = 5; breakdown["均線"] = "股價雖跌破月線，但月線仍維持上彎，視為強勢整理。"
+    else: 
+        scores["MA"] = 0; breakdown["均線"] = "跌破下彎的月線，短線趨勢偏空。"
     
-    # 2. 型態動能(15) - 創20日新高
-    if C >= ta["H20"]: scores["Pattern"] = 15
-    elif C >= ta["H20"] * 0.97: scores["Pattern"] = 10
-    elif C >= (ta["H20"] + ta["L20"])/2: scores["Pattern"] = 5
-    else: scores["Pattern"] = 0
+    # 2. 型態動能(15) 
+    if C >= ta["H20"]: 
+        scores["Pattern"] = 15; breakdown["型態"] = "創下近20日新高，動能強勢發動突破。"
+    elif C >= ta["H20"] * 0.97: 
+        scores["Pattern"] = 10; breakdown["型態"] = "逼近前波高點(3%以內)，蓄勢準備挑戰突破。"
+    elif C >= (ta["H20"] + ta["L20"])/2: 
+        scores["Pattern"] = 5; breakdown["型態"] = "處於近期箱型整理區間的中軸之上，持續震盪。"
+    else: 
+        scores["Pattern"] = 0; breakdown["型態"] = "弱勢破底或處於盤整區間下緣。"
     
     # 3. 壓力/支撐(10)
-    if C > MAs[3]: scores["Support"] = 10
-    else: scores["Support"] = 0
+    if C > MAs[3]: 
+        scores["Support"] = 10; breakdown["壓力"] = "站上季線(60MA)，長線具備強烈支撐。"
+    else: 
+        scores["Support"] = 0; breakdown["壓力"] = "位於季線之下，上方長線壓力較為沉重。"
     
     # 4. 價量(15)
-    if C > ta["O"] and ta["Vol"] > ta["Vol5"] * 1.5: scores["Volume"] = 15
-    elif C > ta["O"] and ta["Vol"] > ta["Vol5"]: scores["Volume"] = 10
-    elif ta["Vol"] <= ta["Vol5"]: scores["Volume"] = 5
-    else: scores["Volume"] = 0
+    if C > ta["O"] and ta["Vol"] > ta["Vol5"] * 1.5: 
+        scores["Volume"] = 15; breakdown["價量"] = "帶量收紅，成交量大於5日均量1.5倍，主力攻擊量現。"
+    elif C > ta["O"] and ta["Vol"] > ta["Vol5"]: 
+        scores["Volume"] = 10; breakdown["價量"] = "溫和放量收紅，量價配合良好。"
+    elif ta["Vol"] <= ta["Vol5"]: 
+        scores["Volume"] = 5; breakdown["價量"] = "量縮整理，籌碼相對安定未失控。"
+    else: 
+        scores["Volume"] = 0; breakdown["價量"] = "爆量收黑或出現價量背離，須留意出貨風險。"
     
     # 5. RS(15)
-    if ta["RS"] > 5: scores["RS"] = 15
-    elif ta["RS"] > 0: scores["RS"] = 10
-    else: scores["RS"] = 0
+    if ta["RS"] > 5: 
+        scores["RS"] = 15; breakdown["RS"] = "近10日報酬強於大盤5%以上，為市場主流強勢股。"
+    elif ta["RS"] > 0: 
+        scores["RS"] = 10; breakdown["RS"] = "近期走勢優於大盤，具備相對抗跌特性。"
+    else: 
+        scores["RS"] = 0; breakdown["RS"] = "走勢弱於大盤，目前較不受市場資金青睞。"
     
     # 6. MACD(10)
-    if ta["DIF"] > ta["DEA"] and ta["OSC"] > ta["OSC_Y"] and ta["OSC"] > 0: scores["MACD"] = 10
-    elif ta["DIF"] > ta["DEA"] and ta["OSC"] > 0: scores["MACD"] = 7
-    elif ta["DIF"] < ta["DEA"] and ta["OSC"] > ta["OSC_Y"]: scores["MACD"] = 3
-    else: scores["MACD"] = 0
+    if ta["DIF"] > ta["DEA"] and ta["OSC"] > ta["OSC_Y"] and ta["OSC"] > 0: 
+        scores["MACD"] = 10; breakdown["MACD"] = "維持多頭交叉，且紅柱狀圖持續放大，動能強勁。"
+    elif ta["DIF"] > ta["DEA"] and ta["OSC"] > 0: 
+        scores["MACD"] = 7; breakdown["MACD"] = "維持多頭，但紅柱狀圖已開始縮短，上攻動能略減。"
+    elif ta["DIF"] < ta["DEA"] and ta["OSC"] > ta["OSC_Y"]: 
+        scores["MACD"] = 3; breakdown["MACD"] = "空頭格局，但綠柱狀圖縮短，有跌深反彈契機。"
+    else: 
+        scores["MACD"] = 0; breakdown["MACD"] = "死亡交叉且綠柱持續放大，空方動能增強。"
     
     # 7. KD(10)
-    if ta["K"] > ta["D"] and ta["K"] > ta["K_Y"]: scores["KD"] = 10
-    elif ta["K"] > ta["D"]: scores["KD"] = 5
-    else: scores["KD"] = 0
+    if ta["K"] > ta["D"] and ta["K"] > ta["K_Y"]: 
+        scores["KD"] = 10; breakdown["KD"] = "K>D且K值向上，短線強勢不變。"
+    elif ta["K"] > ta["D"]: 
+        scores["KD"] = 5; breakdown["KD"] = "維持黃金交叉，但K值略微下彎轉弱。"
+    else: 
+        scores["KD"] = 0; breakdown["KD"] = "死亡交叉，短線進入弱勢整理。"
     
     # 8. 乖離(10)
-    if 0 <= ta["BIAS"] <= 8: scores["BIAS"] = 10
-    elif 8 < ta["BIAS"] <= 15: scores["BIAS"] = 5
-    else: scores["BIAS"] = 0
+    if 0 <= ta["BIAS"] <= 8: 
+        scores["BIAS"] = 10; breakdown["乖離"] = "正乖離介於0~8%的安全起漲區間內。"
+    elif 8 < ta["BIAS"] <= 15: 
+        scores["BIAS"] = 5; breakdown["乖離"] = "正乖離偏高，短線有過熱拉回風險。"
+    else: 
+        scores["BIAS"] = 0; breakdown["乖離"] = "乖離率過大或呈現負乖離破線狀態。"
     
     total = sum(scores.values())
     radar = [scores["MA"], scores["Pattern"], scores["Support"], scores["Volume"], scores["RS"], scores["MACD"], scores["KD"], scores["BIAS"]]
-    return total, radar
+    return total, radar, breakdown
 
 # ==========================================
-# 5. 核心調度 (極致省油版：AI只負責評論)
+# 5. 核心調度 (終極壓縮 AI)
 # ==========================================
-SYS_INSTRUCT = """你是朱家泓波段長。以下是Python計算的客觀技術分數(滿分100)。
-請根據此分數，嚴格回傳純JSON。鍵值：{"tech_breakdown":{"項目":"基於分數的短評(如:動能極強)"}, "trading_plan":{"buy_zone":"建議買區","stop_loss":"停損價位","take_profit":"停利預估","risk_reward_eval":"風報比簡評"}, "conclusion":"綜合操作建議", "veto_alert":"破20MA或爆量長黑則填寫否決，否則填無"}"""
+SYS_INSTRUCT = """你是朱家泓波段長。以下是客觀技術分數(滿分100)。
+請嚴格回傳純JSON。鍵值：{"trading_plan":{"buy_zone":"建議買區","stop_loss":"停損價位","take_profit":"停利預估","risk_reward_eval":"風報比簡評"}, "conclusion":"綜合操作建議", "veto_alert":"破20MA或爆量長黑則填寫否決，否則填無"}"""
 
 def safe_generate_content(prompt_data):
     num_keys = len(API_KEYS)
@@ -252,21 +286,22 @@ def run_analysis(ticker_input):
         ta = calculate_technical_data(df, get_market_return(".TW" in tk or ".TWO" in tk))
         if ta is None: return {"error": "指標運算異常"}
         
-        # 取得純淨的中文名稱
-        chinese_name = get_chinese_name(yahoo_tk)
+        # 修正：直接傳入 tk 進行判斷，並抓取正確中文名
+        chinese_name = get_chinese_name(tk)
         
-        # 執行鐵血計分
-        total_score, radar_array = get_python_scores(ta)
+        # 取得總分、雷達數值與 8 大細節短評
+        total_score, radar_array, py_breakdown = get_python_scores(ta)
         
-        # 極致省油 Prompt
+        # 極致省油 Prompt (不再要求 AI 寫 breakdown)
         mini_prompt = f'{{"T":"{tk}","C":{ta["C"]},"Score":{total_score},"Radar":{radar_array},"MAs":{ta["MAs"]},"B":{ta["BIAS"]}}}'
         
         res = safe_generate_content(mini_prompt)
         raw = res.text
         parsed = json.loads(raw[raw.find('{'):raw.rfind('}')+1])
         
-        # 組合 Python 分數與 AI 評論
+        # 將 Python 產生的細節合併進去
         parsed.update({
+            'tech_breakdown': py_breakdown,
             'total_score': total_score, 'radar_scores': radar_array,
             'cost_price': cost, 'resolved_ticker': tk, 'yahoo_ticker': yahoo_tk, 
             'stock_name': chinese_name, 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'current_price': ta['C']
@@ -316,67 +351,4 @@ with col_clear:
         st.session_state.db = {"manual_results": []}
         save_history([]); st.rerun()
 
-if st.button("🚀 啟動學術診斷", type="primary", use_container_width=True):
-    tickers = [t.strip() for t in user_in.split(",") if t.strip()]
-    prog, status = st.progress(0), st.empty()
-    for idx, tk in enumerate(tickers):
-        status.info(f"⏳ 分析 {tk} ...")
-        res = run_analysis(tk)
-        if "error" not in res:
-            st.session_state.db['manual_results'].insert(0, {"full_ticker": res['resolved_ticker'], "deep": res})
-            save_history(st.session_state.db['manual_results'])
-        else: st.error(f"❌ {tk} 失敗：{res['error']}")
-        prog.progress((idx + 1) / len(tickers))
-    st.rerun()
-
-for i, item in enumerate(st.session_state.db['manual_results']):
-    d = item['deep']
-    tk = d.get('resolved_ticker', '')
-    yahoo_tk = d.get('yahoo_ticker', tk) 
-    name = d.get('stock_name', '') 
-    cost, c_price = d.get('cost_price'), d.get('current_price', 0)
-    
-    pnl_tag = f"&nbsp;&nbsp;<span style='color:{'#ff4b4b' if c_price>=cost else '#00cc96'}; font-weight:bold;'>【帳面: {'+' if c_price>=cost else ''}{round((c_price-cost)/cost*100, 2)}%】</span>" if cost else ""
-    links = f"&nbsp;&nbsp;<a href='https://hk.finance.yahoo.com/quote/{yahoo_tk}' target='_blank' style='text-decoration:none; background:#eee; color:#333; padding:2px 8px; border-radius:12px; font-size:12px;'>Yahoo</a>&nbsp;<a href='https://tw.tradingview.com/chart/?symbol={tk}' target='_blank' style='text-decoration:none; background:#eee; color:#333; padding:2px 8px; border-radius:12px; font-size:12px;'>TradingView</a>"
-    
-    with st.expander(f"📌 {tk} {name}", expanded=(i==0)):
-        st.markdown(f"🕒 *分析時間: {d.get('timestamp', '未知')}* {pnl_tag} {links}", unsafe_allow_html=True)
-        if d.get('veto_alert') and d.get('veto_alert') != '無': st.error(f"🚫 否決：{d['veto_alert']}")
-        
-        st.markdown(f"<h1 style='text-align:center;'>{d.get('total_score', '?')} / 100</h1>", unsafe_allow_html=True)
-        st.info(f"**操作建議：** {d.get('conclusion', '')}")
-        
-        c_left, c_right = st.columns([1, 1])
-        with c_left:
-            st.subheader("📊 給分細節")
-            for k, v in d.get('tech_breakdown', {}).items(): st.write(f"- **{k}**: {v}")
-            p = d.get('trading_plan', {})
-            st.warning(f"買區: {p.get('buy_zone')}\n\n停損: {p.get('stop_loss')}\n\n停利: {p.get('take_profit')}\n\n風報: {p.get('risk_reward_eval')}")
-            
-            # 📋 一鍵複製區塊
-            copy_text = f"【{tk} {name}】波段診斷報告\n時間: {d.get('timestamp', '')}\n總分: {d.get('total_score', '')} / 100\n結論: {d.get('conclusion', '')}\n否決: {d.get('veto_alert', '無')}\n"
-            copy_text += "\n[實戰計畫]\n" + f"買區: {p.get('buy_zone')}\n停損: {p.get('stop_loss')}\n停利: {p.get('take_profit')}\n風報比: {p.get('risk_reward_eval')}"
-            st.markdown("<br>**📋 點擊右側圖示一鍵複製報告：**", unsafe_allow_html=True)
-            st.code(copy_text, language="markdown")
-            
-        with c_right:
-            radar_fig = plot_radar(d.get('radar_scores', []))
-            if radar_fig: st.plotly_chart(radar_fig, use_container_width=True, key=f"r_{i}")
-            
-            df_k = get_stock_data(yahoo_tk)
-            if df_k is not None:
-                k_fig = plot_kline(df_k, cost)
-                if k_fig: st.plotly_chart(k_fig, use_container_width=True, key=f"k_{i}")
-
-        st.write("---")
-        b1, b2, b3 = st.columns([1, 1, 2])
-        with b1:
-            if st.button("🔄 重新診斷", key=f"up_{i}", use_container_width=True):
-                target = f"{tk}@{cost}" if cost else tk
-                new_res = run_analysis(target)
-                if "error" not in new_res:
-                    st.session_state.db['manual_results'][i]['deep'] = new_res
-                    save_history(st.session_state.db['manual_results']); st.rerun()
-        with b2:
-            if st.button("❌ 刪除紀錄", key=f"del_{i}", use_container_width=True):
-                delete_record(i); st.rerun()
+if st.button("🚀 啟動學術診斷", type="
