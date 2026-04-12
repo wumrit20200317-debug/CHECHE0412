@@ -98,7 +98,7 @@ def get_chinese_name(tk):
             match = re.search(r'<title>(.*?)\s+\(', html)
             if match: return match.group(1).replace('股票價格', '').replace('今日', '').strip()
     except: pass
-    return "" # 抓不到就回傳空字串，防止出現重複代號
+    return "" 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_data(ticker):
@@ -282,24 +282,24 @@ def run_analysis(ticker_input):
             yahoo_tk = tk + ".TWO"
             df = get_stock_data(yahoo_tk)
         
-        if df is None: return {"error": "無法取得報價資料"}
+        if df is None: return {"error": "無法取得報價資料 (請確認代號是否正確或已下市)"}
         ta = calculate_technical_data(df, get_market_return(".TW" in tk or ".TWO" in tk))
-        if ta is None: return {"error": "指標運算異常"}
+        if ta is None: return {"error": "指標運算異常 (可能是剛掛牌無足夠歷史資料)"}
         
-        # 修正：直接傳入 tk 進行判斷，並抓取正確中文名
         chinese_name = get_chinese_name(tk)
         
-        # 取得總分、雷達數值與 8 大細節短評
         total_score, radar_array, py_breakdown = get_python_scores(ta)
         
-        # 極致省油 Prompt (不再要求 AI 寫 breakdown)
         mini_prompt = f'{{"T":"{tk}","C":{ta["C"]},"Score":{total_score},"Radar":{radar_array},"MAs":{ta["MAs"]},"B":{ta["BIAS"]}}}'
         
         res = safe_generate_content(mini_prompt)
         raw = res.text
-        parsed = json.loads(raw[raw.find('{'):raw.rfind('}')+1])
         
-        # 將 Python 產生的細節合併進去
+        try:
+            parsed = json.loads(raw[raw.find('{'):raw.rfind('}')+1])
+        except Exception as e:
+            return {"error": f"AI 回傳格式解析失敗 (JSON異常): {str(e)}"}
+            
         parsed.update({
             'tech_breakdown': py_breakdown,
             'total_score': total_score, 'radar_scores': radar_array,
@@ -310,7 +310,7 @@ def run_analysis(ticker_input):
     except Exception as e: return {"error": f"系統異常: {str(e)}"}
 
 # ==========================================
-# 6. UI 與圖表渲染
+# 6. UI 與圖表渲染 (修正抓鬼按鈕版)
 # ==========================================
 def plot_kline(df, cost=None):
     try:
@@ -351,18 +351,32 @@ with col_clear:
         st.session_state.db = {"manual_results": []}
         save_history([]); st.rerun()
 
+# 🚨 V14.3.2 終極防呆防掩蓋按鈕
 if st.button("🚀 啟動學術診斷", type="primary", use_container_width=True):
     tickers = [t.strip() for t in user_in.split(",") if t.strip()]
-    prog, status = st.progress(0), st.empty()
-    for idx, tk in enumerate(tickers):
-        status.info(f"⏳ 分析 {tk} ...")
-        res = run_analysis(tk)
-        if "error" not in res:
-            st.session_state.db['manual_results'].insert(0, {"full_ticker": res['resolved_ticker'], "deep": res})
-            save_history(st.session_state.db['manual_results'])
-        else: st.error(f"❌ {tk} 失敗：{res['error']}")
-        prog.progress((idx + 1) / len(tickers))
-    st.rerun()
+    
+    if not tickers:
+        st.warning("⚠️ 請先在上方輸入框填寫股票代號 (例如：2330)！")
+    else:
+        prog, status = st.progress(0), st.empty()
+        has_error = False
+        
+        for idx, tk in enumerate(tickers):
+            status.info(f"⏳ 分析 {tk} ...")
+            res = run_analysis(tk)
+            if "error" not in res:
+                st.session_state.db['manual_results'].insert(0, {"full_ticker": res['resolved_ticker'], "deep": res})
+                save_history(st.session_state.db['manual_results'])
+            else: 
+                st.error(f"❌ {tk} 失敗：{res['error']}")
+                has_error = True
+                
+            prog.progress((idx + 1) / len(tickers))
+            
+        status.empty()
+        
+        if not has_error:
+            st.rerun()
 
 for i, item in enumerate(st.session_state.db['manual_results']):
     d = item['deep']
@@ -388,7 +402,6 @@ for i, item in enumerate(st.session_state.db['manual_results']):
             p = d.get('trading_plan', {})
             st.warning(f"買區: {p.get('buy_zone')}\n\n停損: {p.get('stop_loss')}\n\n停利: {p.get('take_profit')}\n\n風報: {p.get('risk_reward_eval')}")
             
-            # 📋 一鍵複製區塊
             copy_text = f"【{tk} {name}】波段診斷報告\n時間: {d.get('timestamp', '')}\n總分: {d.get('total_score', '')} / 100\n結論: {d.get('conclusion', '')}\n否決: {d.get('veto_alert', '無')}\n"
             copy_text += "\n[實戰計畫]\n" + f"買區: {p.get('buy_zone')}\n停損: {p.get('stop_loss')}\n停利: {p.get('take_profit')}\n風報比: {p.get('risk_reward_eval')}"
             st.markdown("<br>**📋 點擊右側圖示一鍵複製報告：**", unsafe_allow_html=True)
