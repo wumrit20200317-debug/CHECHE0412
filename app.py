@@ -79,7 +79,7 @@ def delete_record(index):
         save_history(st.session_state.db['manual_results'])
 
 # ==========================================
-# 3. 數據精算與爬蟲 (升級版偽裝爬蟲)
+# 3. 數據精算與爬蟲 
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_chinese_name(tk):
@@ -121,12 +121,14 @@ def calculate_technical_data(df, market_ret):
         open_p = df['Open'].iloc[-1]
         ma5, ma10, ma20, ma60 = [df['Close'].rolling(w).mean().iloc[-1] for w in [5, 10, 20, 60]]
         ma20_yest = df['Close'].rolling(20).mean().iloc[-2]
+        ma60_yest = df['Close'].rolling(60).mean().iloc[-2] # 新增：為了判斷季線趨勢
         
         vol = df['Volume'].iloc[-1]
         vol_5ma = df['Volume'].rolling(5).mean().iloc[-1]
         
         high_20 = df['High'].tail(20).max()
         low_20 = df['Low'].tail(20).min()
+        low_20_yest = df['Low'].iloc[-21:-1].min() if len(df) >= 21 else df['Low'].min() # 新增：前20日低點
         
         exp1, exp2 = df['Close'].ewm(span=12, adjust=False).mean(), df['Close'].ewm(span=26, adjust=False).mean()
         dif, dea = (exp1 - exp2), (exp1 - exp2).ewm(span=9, adjust=False).mean()
@@ -144,27 +146,52 @@ def calculate_technical_data(df, market_ret):
         
         return {
             "C": round(close, 2), "O": round(open_p, 2), "MAs": [round(ma5,2), round(ma10,2), round(ma20,2), round(ma60,2)],
-            "T20": 1 if ma20 > ma20_yest else 0, "BIAS": round(bias20, 2), 
-            "RS": round(rs, 2), "Vol": vol, "Vol5": vol_5ma,
-            "H20": round(high_20, 2), "L20": round(low_20, 2),
+            "T20": 1 if ma20 > ma20_yest else 0, "T60": 1 if ma60 > ma60_yest else 0, 
+            "BIAS": round(bias20, 2), "RS": round(rs, 2), 
+            "Vol": vol, "Vol5": vol_5ma,
+            "H20": round(high_20, 2), "L20": round(low_20, 2), "L20_Y": round(low_20_yest, 2),
             "DIF": round(dif.iloc[-1], 2), "DEA": round(dea.iloc[-1], 2), "OSC": round(osc.iloc[-1], 2), "OSC_Y": round(osc_yest, 2),
             "K": round(k.iloc[-1], 2), "D": round(d.iloc[-1], 2), "K_Y": round(k_yest, 2)
         }
     except: return None
 
 # ==========================================
-# 4. 鐵血計分引擎 (自帶 8 大細節短評)
+# 4. 鐵血計分引擎 (六大否決與 8 大短評)
 # ==========================================
 def get_python_scores(ta):
     scores = {}
     breakdown = {}
-    C, MAs, T20 = ta["C"], ta["MAs"], ta["T20"]
+    vetos = []
     
+    C, MAs, T20, T60 = ta["C"], ta["MAs"], ta["T20"], ta["T60"]
+    
+    # 🚨 Python 鐵血六大否決邏輯
+    # 1. 破下彎月線
+    if C < MAs[2] and T20 == 0:
+        vetos.append("股價跌破月線(20MA)且月線下彎，波段保護力消失")
+    # 2. 跌破前波低點
+    if C < ta["L20_Y"]:
+        vetos.append("股價跌破近20日低點，盤整區間破底轉空")
+    # 3. 高檔爆量長黑 (大於5日均量2.5倍)
+    if C < ta["O"] and ta["Vol"] > ta["Vol5"] * 2.5:
+        vetos.append("爆出大於5日均量2.5倍的天量且收黑，具備極高出貨疑慮")
+    # 4. 季線蓋頭壓
+    if C < MAs[3] and T60 == 0:
+        vetos.append("上方季線(60MA)下彎蓋頭反壓，長線上漲空間受限")
+    # 5. MACD零軸下死叉/綠柱放大
+    if ta["DIF"] < 0 and ta["DEA"] < 0 and ta["DIF"] < ta["DEA"] and ta["OSC"] < ta["OSC_Y"]:
+        vetos.append("MACD零軸下死亡交叉且綠柱放大，空方動能強勁")
+    # 6. 三線空排
+    if MAs[0] < MAs[1] < MAs[2]:
+        vetos.append("短中期均線(5MA<10MA<20MA)呈空頭排列，切勿接刀")
+
+    veto_str = "；".join(vetos) if vetos else "無"
+
     # 1. 均線(15)
     if C > MAs[0] > MAs[1] > MAs[2] > MAs[3]: 
         scores["MA"] = 15; breakdown["均線"] = "短中長天期均線呈標準多頭排列，多方動能極強。"
     elif C > MAs[2] and T20 == 1: 
-        scores["MA"] = 10; breakdown["均線"] = "股價穩站月線(20MA)之上且趨勢向上，具備波段保護力。"
+        scores["MA"] = 10; breakdown["均線"] = "股價穩站月線之上且趨勢向上，具備波段保護力。"
     elif T20 == 1: 
         scores["MA"] = 5; breakdown["均線"] = "股價雖跌破月線，但月線仍維持上彎，視為強勢整理。"
     else: 
@@ -232,13 +259,13 @@ def get_python_scores(ta):
     
     total = sum(scores.values())
     radar = [scores["MA"], scores["Pattern"], scores["Support"], scores["Volume"], scores["RS"], scores["MACD"], scores["KD"], scores["BIAS"]]
-    return total, radar, breakdown
+    return total, radar, breakdown, veto_str
 
 # ==========================================
-# 5. 核心調度 (終極壓縮 AI)
+# 5. 核心調度 (終極壓縮 AI，拔除所有不必要推論)
 # ==========================================
 SYS_INSTRUCT = """你是朱家泓波段長。以下是客觀技術分數(滿分100)。
-請嚴格回傳純JSON。鍵值：{"trading_plan":{"buy_zone":"建議買區","stop_loss":"停損價位","take_profit":"停利預估","risk_reward_eval":"風報比簡評"}, "conclusion":"綜合操作建議", "veto_alert":"破20MA或爆量長黑則填寫否決，否則填無"}"""
+請嚴格回傳純JSON。鍵值：{"trading_plan":{"buy_zone":"建議買區","stop_loss":"停損價位","take_profit":"停利預估","risk_reward_eval":"風報比簡評"}, "conclusion":"綜合操作建議"}"""
 
 def safe_generate_content(prompt_data):
     num_keys = len(API_KEYS)
@@ -288,8 +315,10 @@ def run_analysis(ticker_input):
         
         chinese_name = get_chinese_name(tk)
         
-        total_score, radar_array, py_breakdown = get_python_scores(ta)
+        # 🚨 取回雷達圖陣列與 Python 鐵血判斷
+        total_score, radar_array, py_breakdown, py_veto = get_python_scores(ta)
         
+        # 極致壓縮，省油最高指導原則
         mini_prompt = f'{{"T":"{tk}","C":{ta["C"]},"Score":{total_score},"Radar":{radar_array},"MAs":{ta["MAs"]},"B":{ta["BIAS"]}}}'
         
         res = safe_generate_content(mini_prompt)
@@ -302,6 +331,7 @@ def run_analysis(ticker_input):
             
         parsed.update({
             'tech_breakdown': py_breakdown,
+            'veto_alert': py_veto, 
             'total_score': total_score, 'radar_scores': radar_array,
             'cost_price': cost, 'resolved_ticker': tk, 'yahoo_ticker': yahoo_tk, 
             'stock_name': chinese_name, 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'current_price': ta['C']
@@ -310,7 +340,7 @@ def run_analysis(ticker_input):
     except Exception as e: return {"error": f"系統異常: {str(e)}"}
 
 # ==========================================
-# 6. UI 與圖表渲染 (修正抓鬼按鈕版)
+# 6. UI 與圖表渲染
 # ==========================================
 def plot_kline(df, cost=None):
     try:
@@ -324,8 +354,10 @@ def plot_kline(df, cost=None):
         return fig
     except: return None
 
-def plot_radar(scores):
+def plot_radar(scores_input):
     try:
+        # 🚨 雷達圖修復：強制轉成新陣列，避免修改原始數據
+        scores = list(scores_input) 
         cats = ['均線(15)', '型態(15)', '壓力(10)', '價量(15)', 'RS(15)', 'MACD(10)', 'KD(10)', '乖離(10)']
         max_s = [15, 15, 10, 15, 15, 10, 10, 10]
         if len(scores) != 8: return None
@@ -351,7 +383,6 @@ with col_clear:
         st.session_state.db = {"manual_results": []}
         save_history([]); st.rerun()
 
-# 🚨 V14.3.2 終極防呆防掩蓋按鈕
 if st.button("🚀 啟動學術診斷", type="primary", use_container_width=True):
     tickers = [t.strip() for t in user_in.split(",") if t.strip()]
     
@@ -390,7 +421,9 @@ for i, item in enumerate(st.session_state.db['manual_results']):
     
     with st.expander(f"📌 {tk} {name}", expanded=(i==0)):
         st.markdown(f"🕒 *分析時間: {d.get('timestamp', '未知')}* {pnl_tag} {links}", unsafe_allow_html=True)
-        if d.get('veto_alert') and d.get('veto_alert') != '無': st.error(f"🚫 否決：{d['veto_alert']}")
+        # 🚨 六大否決的紅色警告框會在這裡觸發
+        if d.get('veto_alert') and d.get('veto_alert') != '無': 
+            st.error(f"🚫 否決條件觸發：{d['veto_alert']}")
         
         st.markdown(f"<h1 style='text-align:center;'>{d.get('total_score', '?')} / 100</h1>", unsafe_allow_html=True)
         st.info(f"**操作建議：** {d.get('conclusion', '')}")
